@@ -218,6 +218,9 @@ int main() {
         }
     }
 
+    //this is my first chenges for this project
+    //second changes
+
     // Закрытие серверного сокета и соединения с базой данных
     close(server_socket);
     sqlite3_close(db);
