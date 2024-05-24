@@ -1,0 +1,10 @@
+CC = g++
+CFLAGS = -std=c++11 -Wall
+
+all: UniProjectCryptography
+
+MyProject: main.cpp
+	$(CC) $(CFLAGS) -o UniProjectCryptography main.cpp -lsqlite3
+
+clean:
+	rm -f UniProjectCryptography

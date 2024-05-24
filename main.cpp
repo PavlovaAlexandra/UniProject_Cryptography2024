@@ -5,7 +5,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <sqlite3.h> // Подключение библиотеки SQLite
+#include "sqlite3.h"
 
 // Функция обработки запросов на регистрацию новых пользователей
 void handle_registration(int client_socket, sqlite3 *db) {
@@ -152,7 +152,7 @@ int main() {
 
     // Открытие соединения с базой данных SQLite
     sqlite3 *db;
-    int db_open_result = sqlite3_open("/Users/alexandra/MasterDegree/PisaStudy/2semester/AppliedCryptography/MyProject/BBS.db", &db);
+    int db_open_result = sqlite3_open("/home/frank99/NewProjCrypto/UniProject_Cryptography2024/BBS.db", &db);
     if (db_open_result != SQLITE_OK) {
         std::cerr << "Error: Failed to open database.\n";
         return EXIT_FAILURE;
