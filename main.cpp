@@ -1,392 +1,278 @@
 #include <iostream>
-#include <cstdlib>
 #include <cstring>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <sqlite3.h> // Подключение библиотеки SQLite
-                      // Include SQLite library
+#include <arpa/inet.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <sqlite3.h>
+#include "hashing.h"
 
-// Функция для создания таблицы сообщений
-// Function to create messages table
-void create_messages_table(sqlite3 *db) {
-    const char *create_table_query = "CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, title TEXT, author TEXT, body TEXT);";
-    int create_table_result = sqlite3_exec(db, create_table_query, NULL, NULL, NULL);
-    if (create_table_result != SQLITE_OK) {
-        std::cerr << "Error: Failed to create messages table.\n";
+void init_openssl() {
+    SSL_load_error_strings();
+    OpenSSL_add_ssl_algorithms();
+}
+
+void cleanup_openssl() {
+    EVP_cleanup();
+}
+
+SSL_CTX *create_context() {
+    const SSL_METHOD *method = SSLv23_server_method();
+    SSL_CTX *ctx = SSL_CTX_new(method);
+    if (!ctx) {
+        std::cerr << "Unable to create SSL context\n";
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    return ctx;
+}
+
+void configure_context(SSL_CTX *ctx) {
+    SSL_CTX_set_ecdh_auto(ctx, 1);
+
+    if (SSL_CTX_use_certificate_file(ctx, "/Users/alexandra/MasterDegree/PisaStudy/2semester/AppliedCryptography/MyProject/Сertificate/cert.pem", SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+
+    if (SSL_CTX_use_PrivateKey_file(ctx, "/Users/alexandra/MasterDegree/PisaStudy/2semester/AppliedCryptography/MyProject/Сertificate/key.pem", SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
     }
 }
 
-// Функция для чтения последних n сообщений
-// Function to read the last n messages
-void list_messages(int client_socket, int n, sqlite3 *db) {
-    char buffer[1024];
-    snprintf(buffer, sizeof(buffer), "SELECT * FROM messages ORDER BY id DESC LIMIT %d;", n);
-    sqlite3_stmt *statement;
-    int prepare_result = sqlite3_prepare_v2(db, buffer, -1, &statement, NULL);
-    if (prepare_result != SQLITE_OK) {
-        std::cerr << "Error: Failed to prepare SQL statement.\n";
+void handle_registration(SSL *ssl, sqlite3 *db) {
+    const char *prompt = "READY_FOR_DATA\n";
+    SSL_write(ssl, prompt, strlen(prompt));
+
+    char buffer[1024] = {0};
+    int bytes_received = SSL_read(ssl, buffer, sizeof(buffer));
+    if (bytes_received <= 0) {
+        std::cerr << "Error: Failed to receive data from client.\n";
+        return;
+    }
+    buffer[bytes_received] = '\0';
+
+    std::string data(buffer);
+    size_t pos1 = data.find(';');
+    size_t pos2 = data.find(';', pos1 + 1);
+    if (pos1 == std::string::npos || pos2 == std::string::npos) {
+        const char *error = "Invalid data format\n";
+        SSL_write(ssl, error, strlen(error));
         return;
     }
 
-    // Выполнение запроса
-    // Execute query
-    std::string message = "Recent messages:\n";
-    while (sqlite3_step(statement) == SQLITE_ROW) {
-        int id = sqlite3_column_int(statement, 0);
-        const unsigned char *title = sqlite3_column_text(statement, 1);
-        const unsigned char *author = sqlite3_column_text(statement, 2);
-        message += std::to_string(id) + ": " + (const char *)title + " by " + (const char *)author + "\n";
-    }
-    sqlite3_finalize(statement);
+    std::string email = data.substr(0, pos1);
+    std::string login = data.substr(pos1 + 1, pos2 - pos1 - 1);
+    std::string password = data.substr(pos2 + 1);
 
-    // Отправка сообщения клиенту
-    // Send message to client
-    send(client_socket, message.c_str(), message.length(), 0);
-}
+    std::string salt = generate_salt(16); // Генерируем соль длиной 16 символов
+    std::string hashed_password = hash_password(password, salt);
 
-// Функция для загрузки сообщения по его идентификатору
-// Function to get a message by its ID
-void get_message(int client_socket, int mid, sqlite3 *db) {
-    char buffer[1024];
-    snprintf(buffer, sizeof(buffer), "SELECT * FROM messages WHERE id=%d;", mid);
-    sqlite3_stmt *statement;
-    int prepare_result = sqlite3_prepare_v2(db, buffer, -1, &statement, NULL);
-    if (prepare_result != SQLITE_OK) {
-        std::cerr << "Error: Failed to prepare SQL statement.\n";
+    std::string sql = "INSERT INTO users (email, login, password, salt) VALUES (?, ?, ?, ?);";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        const char *error = "Failed to prepare statement\n";
+        SSL_write(ssl, error, strlen(error));
         return;
     }
 
-    // Выполнение запроса
-    // Execute query
-    if (sqlite3_step(statement) == SQLITE_ROW) {
-        const unsigned char *title = sqlite3_column_text(statement, 1);
-        const unsigned char *author = sqlite3_column_text(statement, 2);
-        const unsigned char *body = sqlite3_column_text(statement, 3);
-        std::string message = "Message:\nTitle: " + std::string((const char *)title) + "\nAuthor: " + std::string((const char *)author) + "\nBody: " + std::string((const char *)body) + "\n";
-        send(client_socket, message.c_str(), message.length(), 0);
+    if (sqlite3_bind_text(stmt, 1, email.c_str(), -1, SQLITE_STATIC) != SQLITE_OK ||
+        sqlite3_bind_text(stmt, 2, login.c_str(), -1, SQLITE_STATIC) != SQLITE_OK ||
+        sqlite3_bind_text(stmt, 3, hashed_password.c_str(), -1, SQLITE_STATIC) != SQLITE_OK ||
+        sqlite3_bind_text(stmt, 4, salt.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
+        const char *error = "Failed to bind values\n";
+        SSL_write(ssl, error, strlen(error));
+        sqlite3_finalize(stmt);
+        return;
+    }
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        const char *error = "Failed to execute statement\n";
+        SSL_write(ssl, error, strlen(error));
     } else {
-        const char *error_message = "Message not found.\n";
-        send(client_socket, error_message, strlen(error_message), 0);
+        const char *success = "Registration successful\n";
+        SSL_write(ssl, success, strlen(success));
     }
-    sqlite3_finalize(statement);
+    sqlite3_finalize(stmt);
 }
 
-// Функция для добавления нового сообщения
-// Function to add a new message
-void add_message(int client_socket, const char *author, sqlite3 *db) {
-    char buffer[1024];
-    const char *prompt = "Enter title and body separated by semicolon (;): ";
-    send(client_socket, prompt, strlen(prompt), 0);
+void handle_login(SSL *ssl, sqlite3 *db, bool &loggedIn, std::string &current_user) {
+    const char *prompt = "READY_FOR_DATA\n";
+    SSL_write(ssl, prompt, strlen(prompt));
 
-    // Принятие данных от клиента (title;body)
-    // Receive data from client (title;body)
-    ssize_t bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
+    char buffer[1024] = {0};
+    int bytes_received = SSL_read(ssl, buffer, sizeof(buffer));
     if (bytes_received <= 0) {
         std::cerr << "Error: Failed to receive data from client.\n";
         return;
     }
     buffer[bytes_received] = '\0';
 
-    // Парсинг данных от клиента (предполагаем, что данные разделены символом ';')
-    // Parse data from client (assuming data is separated by ';')
-    char *title = strtok(buffer, ";");
-    char *body = strtok(NULL, ";");
-
-    // Вставка данных нового сообщения в базу данных
-    // Insert new message data into the database
-    char sql_query[512];
-    snprintf(sql_query, sizeof(sql_query), "INSERT INTO messages (title, author, body) VALUES ('%s', '%s', '%s');", title, author, body);
-    int result = sqlite3_exec(db, sql_query, NULL, NULL, NULL);
-    if (result != SQLITE_OK) {
-        std::cerr << "Error: Failed to add message to database.\n";
-        const char *message = "Failed to add message.\n";
-        send(client_socket, message, strlen(message), 0);
+    std::string data(buffer);
+    size_t pos = data.find(';');
+    if (pos == std::string::npos) {
+        const char *error = "Invalid data format\n";
+        SSL_write(ssl, error, strlen(error));
         return;
     }
 
-    // Отправка подтверждения клиенту
-    // Send confirmation to client
-    const char *message = "Message added successfully!\n";
-    send(client_socket, message, strlen(message), 0);
-}
+    std::string login = data.substr(0, pos);
+    std::string password = data.substr(pos + 1);
 
-// Функция обработки запросов на выход из системы
-// Function to handle logout requests
-void handle_logout(int client_socket, bool &loggedIn) {
-    const char *message = "Logout successful!\n";
-    send(client_socket, message, strlen(message), 0);
-    loggedIn = false; // сбрасываем флаг входа
-                     // reset login flag
-    std::cout << "Client logged out.\n";
-}
-
-// Функция обработки запросов на регистрацию новых пользователей
-// Function to handle new user registration requests
-void handle_registration(int client_socket, sqlite3 *db) {
-    char buffer[1024];
-
-    // Запрос информации от пользователя
-    // Request information from user
-    const char *prompt = "Enter your email, login, and password separated by semicolons (;): ";
-    send(client_socket, prompt, strlen(prompt), 0);
-
-    // Принятие данных от клиента (email, login, password)
-    // Receive data from client (email, login, password)
-    ssize_t bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
-    if (bytes_received <= 0) {
-        std::cerr << "Error: Failed to receive data from client.\n";
-        return;
-    }
-    buffer[bytes_received] = '\0';
-
-    // Парсинг данных от клиента (предполагаем, что данные разделены символом ';')
-    // Parse data from client (assuming data is separated by ';')
-    char *email = strtok(buffer, ";");
-    char *login = strtok(NULL, ";");
-    char *password = strtok(NULL, ";");
-
-    // Проверка на уникальность логина
-    // Check for login uniqueness
-    char check_query[512];
-    snprintf(check_query, sizeof(check_query), "SELECT login FROM users WHERE login='%s';", login);
-    sqlite3_stmt *check_statement;
-    int prepare_check_result = sqlite3_prepare_v2(db, check_query, -1, &check_statement, NULL);
-    if (prepare_check_result != SQLITE_OK) {
-        std::cerr << "Error: Failed to prepare SQL statement.\n";
+    std::string sql = "SELECT password, salt FROM users WHERE login = ?;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        const char *error = "Failed to prepare statement\n";
+        SSL_write(ssl, error, strlen(error));
         return;
     }
 
-    int step_check_result = sqlite3_step(check_statement);
-    if (step_check_result == SQLITE_ROW) {
-        // Логин уже существует, отправка сообщения об ошибке клиенту
-        // Login already exists, send error message to client
-        const char *message = "Registration failed: login already exists.\n";
-        send(client_socket, message, strlen(message), 0);
-        sqlite3_finalize(check_statement);
+    if (sqlite3_bind_text(stmt, 1, login.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
+        const char *error = "Failed to bind values\n";
+        SSL_write(ssl, error, strlen(error));
+        sqlite3_finalize(stmt);
         return;
     }
 
-    sqlite3_finalize(check_statement);
+    int step = sqlite3_step(stmt);
+    if (step == SQLITE_ROW) {
+        std::string stored_password = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        std::string salt = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        std::string hashed_password = hash_password(password, salt);
 
-    // Вставка данных нового пользователя в базу данных
-    // Insert new user data into the database
-    char sql_query[512];
-    snprintf(sql_query, sizeof(sql_query), "INSERT INTO users (email, login, password) VALUES ('%s', '%s', '%s');",
-            email, login, password);
-    int result = sqlite3_exec(db, sql_query, NULL, NULL, NULL);
-    if (result != SQLITE_OK) {
-        std::cerr << "Error: Failed to insert user into database.\n";
-        const char *message = "Registration failed.\n";
-        send(client_socket, message, strlen(message), 0);
-        return;
-    }
-
-    // Отправка подтверждения клиенту
-    // Send confirmation to client
-    const char *message = "Registration successful!\n";
-    send(client_socket, message, strlen(message), 0);
-    std::cout << "New user registered: " << login << std::endl;
-}
-
-// Функция обработки запросов на вход зарегистрированных пользователей
-// Function to handle login requests from registered users
-void handle_login(int client_socket, sqlite3 *db, bool &loggedIn, std::string &current_user) {
-    char buffer[1024];
-
-    // Если пользователь уже вошел в систему, сообщаем ему об этом и завершаем функцию
-    // If user is already logged in, notify and exit function
-    if (loggedIn) {
-        const char *message = "You are already logged in.\n";
-        send(client_socket, message, strlen(message), 0);
-        return;
-    }
-
-    // Запрос логина и пароля от пользователя
-    // Request login and password from user
-    const char *prompt = "Enter your login and password separated by a semicolon (;): ";
-    send(client_socket, prompt, strlen(prompt), 0);
-
-    // Принятие данных от клиента (login, password)
-    // Receive data from client (login, password)
-    ssize_t bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
-    if (bytes_received <= 0) {
-        std::cerr << "Error: Failed to receive data from client.\n";
-        return;
-    }
-    buffer[bytes_received] = '\0';
-
-    // Парсинг данных от клиента (предполагаем, что данные разделены символом ';')
-    // Parse data from client (assuming data is separated by ';')
-    char *login = strtok(buffer, ";");
-    char *password = strtok(NULL, ";");
-
-    // Проверка логина и пароля
-    // Check login and password
-    char sql_query[512];
-    snprintf(sql_query, sizeof(sql_query), "SELECT * FROM users WHERE login='%s' AND password='%s';", login, password);
-    sqlite3_stmt *statement;
-    int prepare_result = sqlite3_prepare_v2(db, sql_query, -1, &statement, NULL);
-    if (prepare_result != SQLITE_OK) {
-        std::cerr << "Error: Failed to prepare SQL statement.\n";
-        return;
-    }
-
-    // Выполнение запроса
-    // Execute query
-    int step_result = sqlite3_step(statement);
-    if (step_result == SQLITE_ROW) {
-        // Пользователь найден, отправка подтверждения клиенту
-        // User found, send confirmation to client
-        const char *message = "Login successful!\n";
-        send(client_socket, message, strlen(message), 0);
-        loggedIn = true; // устанавливаем флаг входа
-                        // set login flag
-        current_user = login; // сохраняем логин текущего пользователя
-                             // save current user's login
-        std::cout << "Client logged in: " << login << std::endl;
+        if (hashed_password == stored_password) {
+            const char *success = "Login successful\n";
+            SSL_write(ssl, success, strlen(success));
+            loggedIn = true;
+            current_user = login;
+        } else {
+            const char *error = "Invalid login or password\n";
+            SSL_write(ssl, error, strlen(error));
+        }
     } else {
-        // Пользователь не найден, отправка сообщения об ошибке клиенту
-        // User not found, send error message to client
-        const char *message = "Login failed: incorrect login or password.\n";
-        send(client_socket, message, strlen(message), 0);
+        const char *error = "Invalid login or password\n";
+        SSL_write(ssl, error, strlen(error));
     }
-
-    sqlite3_finalize(statement);
+    sqlite3_finalize(stmt);
 }
 
-// Измененный main для добавления обработки выбора регистрации, входа, выхода и выполнения операций с сообщениями
-// Modified main to add handling of registration, login, logout, and message operations
+void handle_command(SSL *ssl, sqlite3 *db, bool &loggedIn, std::string &current_user) {
+    char buffer[1024] = {0};
+    int bytes_received = SSL_read(ssl, buffer, sizeof(buffer));
+    if (bytes_received <= 0) {
+        std::cerr << "Error: Failed to receive data from client.\n";
+        return;
+    }
+    buffer[bytes_received] = '\0';
+    std::string command(buffer);
+
+    if (command == "register") {
+        handle_registration(ssl, db);
+    } else if (command == "login") {
+        handle_login(ssl, db, loggedIn, current_user);
+    } else if (command == "exit") {
+        const char *response = "Goodbye!\n";
+        SSL_write(ssl, response, strlen(response));
+        loggedIn = false;
+    } else {
+        const char *unknown = "Unknown command\n";
+        SSL_write(ssl, unknown, strlen(unknown));
+    }
+}
+
 int main() {
-    // Создание сокета
-    // Create socket
-    int server_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_socket == -1) {
-        std::cerr << "Error: Could not create socket.\n";
+    init_openssl();
+    SSL_CTX *ctx = create_context();
+    configure_context(ctx);
+
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd == -1) {
+        perror("socket");
         return EXIT_FAILURE;
     }
 
-    // Настройка адреса сервера
-    // Setup server address
-    struct sockaddr_in server_address;
-    server_address.sin_family = AF_INET;
-    server_address.sin_addr.s_addr = INADDR_ANY;
-    server_address.sin_port = htons(12345);
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(8080);
+    addr.sin_addr.s_addr = INADDR_ANY;
 
-    // Привязка сокета к адресу и порту
-    // Bind socket to address and port
-    if (bind(server_socket, (struct sockaddr *)&server_address, sizeof(server_address)) == -1) {
-        std::cerr << "Error: Could not bind socket to address.\n";
+    if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
+        perror("bind");
+        close(server_fd);
         return EXIT_FAILURE;
     }
 
-    // Начало прослушивания подключений
-    // Start listening for connections
-    if (listen(server_socket, 5) == -1) {
-        std::cerr << "Error: Could not listen on socket.\n";
+    if (listen(server_fd, 10) == -1) {
+        perror("listen");
+        close(server_fd);
         return EXIT_FAILURE;
     }
 
-    std::cout << "Server listening on port 12345...\n";
-
-    // Открытие соединения с базой данных SQLite
-    // Open connection to SQLite database
     sqlite3 *db;
-    int db_open_result = sqlite3_open("/Users/alexandra/MasterDegree/PisaStudy/2semester/AppliedCryptography/MyProject/BBS.db", &db);
-    if (db_open_result != SQLITE_OK) {
-        std::cerr << "Error: Failed to open database.\n";
+    int rc = sqlite3_open("users.db", &db);
+    if (rc) {
+        std::cerr << "Can't open database: " << sqlite3_errmsg(db) << std::endl;
         return EXIT_FAILURE;
     }
 
-    // Создание таблицы пользователей, если она не существует
-    // Create users table if it doesn't exist
-    const char *create_table_query = "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, email TEXT, login TEXT UNIQUE, password TEXT);";
-    int create_table_result = sqlite3_exec(db, create_table_query, NULL, NULL, NULL);
-    if (create_table_result != SQLITE_OK) {
-        std::cerr << "Error: Failed to create users table.\n";
-        return EXIT_FAILURE;
-    }
+    SSL *ssl;
+    struct sockaddr_in cli_addr;
+    socklen_t cli_len = sizeof(cli_addr);
+    int new_socket;
+    bool loggedIn = false;
+    std::string current_user;
 
-    // Создание таблицы сообщений, если она не существует
-    // Create messages table if it doesn't exist
-    create_messages_table(db);
-
-    bool loggedIn = false; // флаг для отслеживания входа пользователя
-                          // flag to track user login status
-    std::string current_user; // переменная для хранения логина текущего пользователя
-                             // variable to store current user's login
-
-    // Принятие и обработка подключений
-    // Accept and handle connections
     while (true) {
-        // Принятие нового подключения
-        // Accept new connection
-        int client_socket = accept(server_socket, NULL, NULL);
-        if (client_socket == -1) {
-            std::cerr << "Error: Could not accept incoming connection.\n";
+        new_socket = accept(server_fd, (struct sockaddr *)&cli_addr, &cli_len);
+        if (new_socket == -1) {
+            perror("accept");
+            close(server_fd);
+            return EXIT_FAILURE;
+        }
+
+        ssl = SSL_new(ctx);
+        if (!ssl) {
+            std::cerr << "Unable to create SSL structure\n";
+            close(new_socket);
             continue;
         }
 
-        std::cout << "New client connected.\n";
+        SSL_set_fd(ssl, new_socket);
+        if (SSL_accept(ssl) <= 0) {
+            ERR_print_errors_fp(stderr);
+            SSL_free(ssl);
+            close(new_socket);
+            continue;
+        }
 
-        // Цикл обработки запросов клиента
-        // Loop to handle client requests
-        while (true) {
-            // Если пользователь уже вошел в систему, предлагаем только logout
-            // If user is already logged in, only offer logout
-            if (loggedIn) {
-                const char *prompt = "Enter 'logout' to logout, 'list <n>' to list last n messages, 'get <mid>' to get message by id, or 'add' to add a new message: ";
-                send(client_socket, prompt, strlen(prompt), 0);
-            } else {
-                // Запрос выбора регистрации, входа или выхода от клиента
-                // Request registration, login, or exit from client
-                const char *prompt = "Enter 'register' for registration, 'login' for login, or 'exit' to exit: ";
-                send(client_socket, prompt, strlen(prompt), 0);
-            }
+        std::cout << "Connected with client\n";
 
-            char choice[256];
-            ssize_t choice_received = recv(client_socket, choice, sizeof(choice), 0);
-            if (choice_received <= 0) {
-                std::cerr << "Error: Failed to receive choice from client.\n";
-                close(client_socket);
-                break; // выход из цикла обработки запросов клиента
-                      // exit client request handling loop
+        pid_t pid = fork();
+        if (pid < 0) {
+            std::cerr << "Error in fork\n";
+            close(new_socket);
+            continue;
+        } else if (pid == 0) { // Child process
+            close(server_fd); // Close server socket in child process
+            while (true) {
+                handle_command(ssl, db, loggedIn, current_user);
+                if (!loggedIn) break;
             }
-            choice[choice_received] = '\0';
-
-            // Обработка выбора
-            // Handle choice
-            if (strcmp(choice, "register\n") == 0) {
-                handle_registration(client_socket, db);
-            } else if (strcmp(choice, "login\n") == 0) {
-                handle_login(client_socket, db, loggedIn, current_user);
-            } else if (strcmp(choice, "logout\n") == 0) {
-                handle_logout(client_socket, loggedIn);
-            } else if (strncmp(choice, "list ", 5) == 0) {
-                int n = atoi(choice + 5);
-                list_messages(client_socket, n, db);
-            } else if (strncmp(choice, "get ", 4) == 0) {
-                int mid = atoi(choice + 4);
-                get_message(client_socket, mid, db);
-            } else if (strcmp(choice, "add\n") == 0) {
-                add_message(client_socket, current_user.c_str(), db);
-            } else if (strcmp(choice, "exit\n") == 0) {
-                std::cout << "Client requested exit.\n";
-                close(client_socket);
-                break; // выход из цикла обработки запросов клиента
-                      // exit client request handling loop
-            } else {
-                const char *message = "Invalid choice.\n";
-                send(client_socket, message, strlen(message), 0);
-            }
+            close(new_socket);
+            return EXIT_SUCCESS;
+        } else { // Parent process
+            close(new_socket); // Close client socket in parent process
         }
     }
 
-    // Закрытие серверного сокета и соединения с базой данных
-    // Close server socket and database connection
-    close(server_socket);
+    close(server_fd);
     sqlite3_close(db);
+    SSL_CTX_free(ctx);
+    cleanup_openssl();
 
     return EXIT_SUCCESS;
 }
