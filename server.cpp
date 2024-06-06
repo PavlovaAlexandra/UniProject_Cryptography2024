@@ -1,74 +1,87 @@
 #include <iostream>
-#include <cstring>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <unistd.h>
 #include <openssl/rsa.h>
 #include <openssl/pem.h>
+#include <openssl/bio.h>
 #include <openssl/err.h>
-#include <openssl/dh.h>
-#include <openssl/bn.h>
+#include <openssl/rand.h>
+#include <cstring>
+#include <unistd.h>
+#include <arpa/inet.h>
 
-// Генерация RSA ключей
-RSA *generateRSAKey()
+// Функция для вывода RSA ключей в PEM формате
+void printRSAKey(RSA *rsa, bool isPrivate)
 {
-    int bits = 2048;
-    unsigned long e = RSA_F4;
-    RSA *rsa = RSA_new();
-    BIGNUM *bne = BN_new();
-
-    if (!BN_set_word(bne, e) || !RSA_generate_key_ex(rsa, bits, bne, NULL))
+    BIO *bio = BIO_new(BIO_s_mem());
+    if (isPrivate)
     {
-        RSA_free(rsa);
-        BN_free(bne);
-        return nullptr;
+        PEM_write_bio_RSAPrivateKey(bio, rsa, NULL, NULL, 0, NULL, NULL);
     }
-
-    BN_free(bne);
-    return rsa;
+    else
+    {
+        PEM_write_bio_RSAPublicKey(bio, rsa);
+    }
+    char *key_data = NULL;
+    long len = BIO_get_mem_data(bio, &key_data);
+    std::string key_str(key_data, len);
+    std::cout << key_str << std::endl;
+    BIO_free(bio);
 }
 
-// Генерация DH параметров
-DH* generateDHParamsWithCustomPQ() {
-    const char* p_str = "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497CEA956AE515D2261898FA051015728E5A8AACAA68FFFFFFFFFFFFFFFF";
-    const char* q_str = "2";
-
-    BIGNUM* p_bn = BN_new();
-    BIGNUM* q_bn = BN_new();
-
-    if (!p_bn || !q_bn || !BN_hex2bn(&p_bn, p_str) || !BN_hex2bn(&q_bn, q_str)) {
-        std::cerr << "Failed to convert p or q to BIGNUM" << std::endl;
-        BN_free(p_bn);
-        BN_free(q_bn);
-        return nullptr;
-    }
-
-    DH* dh = DH_new();
-    if (!dh || !DH_set0_pqg(dh, p_bn, NULL, q_bn)) {
-        std::cerr << "Failed to set custom p and q for DH" << std::endl;
-        BN_free(p_bn);
-        BN_free(q_bn);
-        DH_free(dh);
-        return nullptr;
-    }
-
-    return dh;
-}
-
-
-
-// Генерация секретного ключа на основе общих параметров DH и открытого ключа клиента
-unsigned char *generateSharedSecret(DH *dh, const char *client_public_key)
+// Генерация случайного числа
+std::string generateRandomNumber()
 {
-    BIGNUM *client_pub = BN_new();
-    BN_hex2bn(&client_pub, client_public_key);
+    unsigned char random_number[32];
+    if (RAND_bytes(random_number, sizeof(random_number)) != 1)
+    {
+        std::cerr << "Failed to generate random number" << std::endl;
+        return "";
+    }
+    return std::string((char *)random_number, sizeof(random_number));
+}
 
-    unsigned char *secret = new unsigned char[DH_size(dh)];
-    DH_compute_key(secret, client_pub, dh);
+// Подпись сообщения приватным ключом RSA
+std::string signMessage(RSA *rsa, const std::string &message)
+{
+    unsigned char hash[32];
+    unsigned int sig_len;
+    unsigned char *sig = new unsigned char[RSA_size(rsa)];
 
-    BN_free(client_pub);
-    return secret;
+    if (SHA256((unsigned char *)message.c_str(), message.length(), hash) == NULL)
+    {
+        std::cerr << "SHA256 calculation failed" << std::endl;
+        delete[] sig;
+        return "";
+    }
+
+    if (RSA_sign(NID_sha256, hash, sizeof(hash), sig, &sig_len, rsa) != 1)
+    {
+        std::cerr << "Signing failed" << std::endl;
+        delete[] sig;
+        return "";
+    }
+
+    std::string signature((char *)sig, sig_len);
+    delete[] sig;
+    return signature;
+}
+
+// Функция для конвертации строки в шестнадцатеричное представление
+std::string stringToHex(const std::string &input)
+{
+    static const char *const lut = "0123456789ABCDEF";
+    size_t len = input.length();
+
+    std::string output;
+    output.reserve(2 * len);
+
+    for (size_t i = 0; i < len; ++i)
+    {
+        const unsigned char c = input[i];
+        output.push_back(lut[c >> 4]);
+        output.push_back(lut[c & 15]);
+    }
+
+    return output;
 }
 
 int main()
@@ -82,12 +95,12 @@ int main()
     }
 
     // Настройка адреса сервера и порта
-    struct sockaddr_in serv_addr;
+    struct sockaddr_in serv_addr, client_addr;
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(12345);
     serv_addr.sin_addr.s_addr = INADDR_ANY;
 
-    // Привязка сокета к адресу
+    // Привязка сокета
     if (bind(server_sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) == -1)
     {
         std::cerr << "Bind failed: " << strerror(errno) << std::endl;
@@ -95,7 +108,7 @@ int main()
         return -1;
     }
 
-    // Прослушивание входящих соединений
+    // Прослушивание входящих подключений
     if (listen(server_sock, 1) == -1)
     {
         std::cerr << "Listen failed: " << strerror(errno) << std::endl;
@@ -103,10 +116,8 @@ int main()
         return -1;
     }
 
-    std::cout << "Server is listening on port 12345..." << std::endl;
-
-    // Принятие входящего соединения
-    int client_sock = accept(server_sock, NULL, NULL);
+    socklen_t client_len = sizeof(client_addr);
+    int client_sock = accept(server_sock, (struct sockaddr *)&client_addr, &client_len);
     if (client_sock == -1)
     {
         std::cerr << "Accept failed: " << strerror(errno) << std::endl;
@@ -116,8 +127,8 @@ int main()
 
     std::cout << "Client connected" << std::endl;
 
-    // Генерация RSA ключей
-    RSA *rsa = generateRSAKey();
+    // Генерация пары RSA ключей для сервера
+    RSA *rsa = RSA_generate_key(2048, RSA_F4, NULL, NULL);
     if (!rsa)
     {
         std::cerr << "RSA key generation failed" << std::endl;
@@ -126,26 +137,21 @@ int main()
         return -1;
     }
 
-    // Экспорт открытого ключа RSA
-    BIO *bio = BIO_new(BIO_s_mem());
-    if (!PEM_write_bio_RSAPublicKey(bio, rsa))
-    {
-        std::cerr << "RSA public key export failed" << std::endl;
-        close(client_sock);
-        close(server_sock);
-        RSA_free(rsa);
-        return -1;
-    }
-
-    char *pub_key;
-    long pub_key_len = BIO_get_mem_data(bio, &pub_key);
-
-    std::cout << "RSA key pair generated" << std::endl;
-    std::cout << "RSA public key exported" << std::endl;
-    std::cout << "Exported RSA key: " << std::string(pub_key, pub_key_len) << std::endl;
+    std::cout << "Server RSA keys generated" << std::endl;
+    std::cout << "Public key:" << std::endl;
+    printRSAKey(rsa, false);
+    std::cout << "Private key:" << std::endl;
+    printRSAKey(rsa, true);
 
     // Отправка открытого ключа RSA клиенту
-    if (send(client_sock, pub_key, pub_key_len, 0) == -1)
+    BIO *bio = BIO_new(BIO_s_mem());
+    PEM_write_bio_RSAPublicKey(bio, rsa);
+    char *pub_key_data = NULL;
+    long pub_key_len = BIO_get_mem_data(bio, &pub_key_data);
+    std::string pub_key_str(pub_key_data, pub_key_len);
+    BIO_free(bio);
+
+    if (send(client_sock, pub_key_str.c_str(), pub_key_str.length(), 0) == -1)
     {
         std::cerr << "Send failed: " << strerror(errno) << std::endl;
         close(client_sock);
@@ -154,12 +160,11 @@ int main()
         return -1;
     }
 
-    std::cout << "RSA public key sent to client" << std::endl;
-    BIO_free_all(bio);
+    std::cout << "Public key sent to client" << std::endl;
 
-    // Получение открытого ключа Диффи-Хеллмана от клиента
-    char client_pub_key[2048];
-    int len = read(client_sock, client_pub_key, sizeof(client_pub_key) - 1);
+    // Получение случайного числа R от клиента
+    char buffer[4096];
+    int len = read(client_sock, buffer, sizeof(buffer) - 1);
     if (len == -1)
     {
         std::cerr << "Read failed: " << strerror(errno) << std::endl;
@@ -168,82 +173,137 @@ int main()
         RSA_free(rsa);
         return -1;
     }
-    client_pub_key[len] = '\0';
+    buffer[len] = '\0';
+    std::string R(buffer, len);
 
-    std::cout << "DH public key received from client" << std::endl;
-    std::cout << "Received DH key: " << client_pub_key << std::endl;
+    std::cout << "Random number R received from client: " << R << std::endl;
 
-    // Генерация параметров Диффи-Хеллмана
-    DH *dh = generateDHParamsWithCustomPQ();
-    if (!dh)
+    // Генерация временной пары RSA ключей
+    RSA *temp_rsa = RSA_generate_key(2048, RSA_F4, NULL, NULL);
+    if (!temp_rsa)
     {
-        std::cerr << "DH parameters generation failed" << std::endl;
+        std::cerr << "Temporary RSA key generation failed" << std::endl;
         close(client_sock);
         close(server_sock);
         RSA_free(rsa);
         return -1;
     }
 
-    // Генерация ключей Диффи-Хеллмана
-    if (!DH_generate_key(dh))
+    std::cout << "Temporary RSA keys generated" << std::endl;
+    std::cout << "Temporary public key:" << std::endl;
+    printRSAKey(temp_rsa, false);
+    std::cout << "Temporary private key:" << std::endl;
+    printRSAKey(temp_rsa, true);
+
+    // Создание сертификата (R + публичный temporary ключ)
+    bio = BIO_new(BIO_s_mem());
+    PEM_write_bio_RSAPublicKey(bio, temp_rsa);
+    char *temp_pub_key_data = NULL;
+    long temp_pub_key_len = BIO_get_mem_data(bio, &temp_pub_key_data);
+    std::string temp_pub_key_str(temp_pub_key_data, temp_pub_key_len);
+    BIO_free(bio);
+
+    std::string cert = R + temp_pub_key_str;
+
+    // Подпись сертификата
+    std::string signature = signMessage(rsa, cert);
+    if (signature.empty())
     {
-        std::cerr << "DH key generation failed" << std::endl;
-        DH_free(dh);
+        std::cerr << "Signature creation failed" << std::endl;
         close(client_sock);
         close(server_sock);
         RSA_free(rsa);
+        RSA_free(temp_rsa);
         return -1;
     }
 
-    const BIGNUM *dh_pub_key = nullptr;
-    DH_get0_key(dh, &dh_pub_key, nullptr);
-    char *dh_pub_key_str = BN_bn2hex(dh_pub_key);
+    std::cout << "Certificate signed" << std::endl;
 
-    // Отправка открытого ключа Диффи-Хеллмана клиенту
-    send(client_sock, dh_pub_key_str, strlen(dh_pub_key_str), 0);
-    OPENSSL_free(dh_pub_key_str);
-
-    std::cout << "DH public key sent to client" << std::endl;
-
-    // Получение секретного ключа
-    unsigned char *shared_secret = generateSharedSecret(dh, client_pub_key);
-    if (!shared_secret)
-    {
-        std::cerr << "DH shared secret generation failed" << std::endl;
-        DH_free(dh);
-        close(client_sock);
-        close(server_sock);
-        RSA_free(rsa);
-        return -1;
-    }
-
-    std::cout << "Shared secret generated: ";
-    for (int i = 0; i < DH_size(dh); ++i)
-    {
-        std::cout << std::hex << static_cast<int>(shared_secret[i]);
-    }
-    std::cout << std::endl;
-
-    // Отправка сообщения клиенту (по зашифрованному каналу)
-    const char *message = "This is a secret message";
-    if (send(client_sock, message, strlen(message), 0) == -1)
+    // Отправка сертификата и временного публичного ключа клиенту
+    uint32_t cert_len = htonl(cert.length());
+    if (send(client_sock, &cert_len, sizeof(cert_len), 0) == -1)
     {
         std::cerr << "Send failed: " << strerror(errno) << std::endl;
-        delete[] shared_secret;
-        DH_free(dh);
         close(client_sock);
         close(server_sock);
         RSA_free(rsa);
+        RSA_free(temp_rsa);
         return -1;
     }
 
-    std::cout << "Message sent to client" << std::endl;
+    if (send(client_sock, cert.c_str(), cert.length(), 0) == -1)
+    {
+        std::cerr << "Send failed: " << strerror(errno) << std::endl;
+        close(client_sock);
+        close(server_sock);
+        RSA_free(rsa);
+        RSA_free(temp_rsa);
+        return -1;
+    }
 
-    delete[] shared_secret;
-    DH_free(dh);
+    uint32_t sig_len = htonl(signature.length());
+    if (send(client_sock, &sig_len, sizeof(sig_len), 0) == -1)
+    {
+        std::cerr << "Send failed: " << strerror(errno) << std::endl;
+        close(client_sock);
+        close(server_sock);
+        RSA_free(rsa);
+        RSA_free(temp_rsa);
+        return -1;
+    }
+
+    if (send(client_sock, signature.c_str(), signature.length(), 0) == -1)
+    {
+        std::cerr << "Send failed: " << strerror(errno) << std::endl;
+        close(client_sock);
+        close(server_sock);
+        RSA_free(rsa);
+        RSA_free(temp_rsa);
+        return -1;
+    }
+
+    std::cout << "Certificate and temporary public key sent to client" << std::endl;
+
+    // Получение зашифрованного сессионного ключа от клиента
+    len = read(client_sock, buffer, sizeof(buffer) - 1);
+    if (len == -1)
+    {
+        std::cerr << "Read failed: " << strerror(errno) << std::endl;
+        close(client_sock);
+        close(server_sock);
+        RSA_free(rsa);
+        RSA_free(temp_rsa);
+        return -1;
+    }
+    buffer[len] = '\0';
+    std::string encrypted_session_key(buffer, len);
+
+    // Расшифровка сессионного ключа временным приватным ключом
+    unsigned char *decrypted_session_key = new unsigned char[RSA_size(temp_rsa)];
+    int decrypted_session_key_len = RSA_private_decrypt(encrypted_session_key.length(), (unsigned char *)encrypted_session_key.c_str(), decrypted_session_key, temp_rsa, RSA_PKCS1_OAEP_PADDING);
+
+    if (decrypted_session_key_len == -1)
+    {
+        std::cerr << "Session key decryption failed" << std::endl;
+        delete[] decrypted_session_key;
+        close(client_sock);
+        close(server_sock);
+        RSA_free(rsa);
+        RSA_free(temp_rsa);
+        return -1;
+    }
+
+    std::string session_key((char *)decrypted_session_key, decrypted_session_key_len);
+    delete[] decrypted_session_key;
+
+    std::cout << "Session key decrypted successfully" << std::endl;
+    std::cout << "Session key: " << stringToHex(session_key) << std::endl;
+
+    // Закрытие соединений и освобождение ресурсов
     close(client_sock);
     close(server_sock);
     RSA_free(rsa);
+    RSA_free(temp_rsa);
 
     return 0;
 }
