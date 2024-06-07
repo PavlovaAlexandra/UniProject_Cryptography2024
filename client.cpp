@@ -9,15 +9,30 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
+// Отправка сообщения серверу
+bool sendMessageToServer(int client_sock, const std::string &message)
+{
+    if (send(client_sock, message.c_str(), message.length(), 0) == -1)
+    {
+        std::cerr << "Send failed: " << strerror(errno) << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // Функция для вывода RSA ключей в PEM формате
-void printRSAKey(RSA* rsa, bool isPrivate) {
-    BIO* bio = BIO_new(BIO_s_mem());
-    if (isPrivate) {
+void printRSAKey(RSA *rsa, bool isPrivate)
+{
+    BIO *bio = BIO_new(BIO_s_mem());
+    if (isPrivate)
+    {
         PEM_write_bio_RSAPrivateKey(bio, rsa, NULL, NULL, 0, NULL, NULL);
-    } else {
+    }
+    else
+    {
         PEM_write_bio_RSAPublicKey(bio, rsa);
     }
-    char* key_data = NULL;
+    char *key_data = NULL;
     long len = BIO_get_mem_data(bio, &key_data);
     std::string key_str(key_data, len);
     std::cout << key_str << std::endl;
@@ -25,24 +40,29 @@ void printRSAKey(RSA* rsa, bool isPrivate) {
 }
 
 // Генерация случайного числа
-std::string generateRandomNumber() {
+std::string generateRandomNumber()
+{
     unsigned char random_number[32];
-    if (RAND_bytes(random_number, sizeof(random_number)) != 1) {
+    if (RAND_bytes(random_number, sizeof(random_number)) != 1)
+    {
         std::cerr << "Failed to generate random number" << std::endl;
         return "";
     }
-    return std::string((char*)random_number, sizeof(random_number));
+    return std::string((char *)random_number, sizeof(random_number));
 }
 
 // Проверка подписи сообщения с использованием публичного ключа RSA
-bool verifySignature(RSA* rsa, const std::string& message, const std::string& signature) {
+bool verifySignature(RSA *rsa, const std::string &message, const std::string &signature)
+{
     unsigned char hash[32];
-    if (SHA256((unsigned char*)message.c_str(), message.length(), hash) == NULL) {
+    if (SHA256((unsigned char *)message.c_str(), message.length(), hash) == NULL)
+    {
         std::cerr << "SHA256 calculation failed" << std::endl;
         return false;
     }
 
-    if (RSA_verify(NID_sha256, hash, sizeof(hash), (unsigned char*)signature.c_str(), signature.length(), rsa) != 1) {
+    if (RSA_verify(NID_sha256, hash, sizeof(hash), (unsigned char *)signature.c_str(), signature.length(), rsa) != 1)
+    {
         std::cerr << "Signature verification failed" << std::endl;
         return false;
     }
@@ -51,14 +71,16 @@ bool verifySignature(RSA* rsa, const std::string& message, const std::string& si
 }
 
 // Функция для конвертации строки в шестнадцатеричное представление
-std::string stringToHex(const std::string& input) {
-    static const char* const lut = "0123456789ABCDEF";
+std::string stringToHex(const std::string &input)
+{
+    static const char *const lut = "0123456789ABCDEF";
     size_t len = input.length();
 
     std::string output;
     output.reserve(2 * len);
 
-    for (size_t i = 0; i < len; ++i) {
+    for (size_t i = 0; i < len; ++i)
+    {
         const unsigned char c = input[i];
         output.push_back(lut[c >> 4]);
         output.push_back(lut[c & 15]);
@@ -67,11 +89,12 @@ std::string stringToHex(const std::string& input) {
     return output;
 }
 
-
-int main() {
+int main()
+{
     // Создание сокета
     int client_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (client_sock == -1) {
+    if (client_sock == -1)
+    {
         std::cerr << "Socket creation failed: " << strerror(errno) << std::endl;
         return -1;
     }
@@ -83,7 +106,8 @@ int main() {
     serv_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
     // Подключение к серверу
-    if (connect(client_sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == -1) {
+    if (connect(client_sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) == -1)
+    {
         std::cerr << "Connect failed: " << strerror(errno) << std::endl;
         close(client_sock);
         return -1;
@@ -94,7 +118,8 @@ int main() {
     // Получение публичного ключа сервера
     char buffer[4096];
     int len = read(client_sock, buffer, sizeof(buffer) - 1);
-    if (len == -1) {
+    if (len == -1)
+    {
         std::cerr << "Read failed: " << strerror(errno) << std::endl;
         close(client_sock);
         return -1;
@@ -102,11 +127,12 @@ int main() {
     buffer[len] = '\0';
     std::string server_pub_key_str(buffer);
 
-    BIO* bio = BIO_new_mem_buf((void*)server_pub_key_str.c_str(), -1);
-    RSA* server_rsa = PEM_read_bio_RSAPublicKey(bio, NULL, NULL, NULL);
+    BIO *bio = BIO_new_mem_buf((void *)server_pub_key_str.c_str(), -1);
+    RSA *server_rsa = PEM_read_bio_RSAPublicKey(bio, NULL, NULL, NULL);
     BIO_free(bio);
 
-    if (!server_rsa) {
+    if (!server_rsa)
+    {
         std::cerr << "Failed to parse server public key" << std::endl;
         close(client_sock);
         return -1;
@@ -120,7 +146,8 @@ int main() {
     std::cout << "Random number R generated: " << R << std::endl;
 
     // Отправка случайного числа R серверу
-    if (send(client_sock, R.c_str(), R.length(), 0) == -1) {
+    if (send(client_sock, R.c_str(), R.length(), 0) == -1)
+    {
         std::cerr << "Send failed: " << strerror(errno) << std::endl;
         close(client_sock);
         RSA_free(server_rsa);
@@ -130,7 +157,8 @@ int main() {
     // Получение сертификата и временного публичного ключа от сервера
     uint32_t cert_len;
     len = read(client_sock, &cert_len, sizeof(cert_len));
-    if (len == -1) {
+    if (len == -1)
+    {
         std::cerr << "Read failed: " << strerror(errno) << std::endl;
         close(client_sock);
         RSA_free(server_rsa);
@@ -141,7 +169,8 @@ int main() {
     std::string cert;
     cert.resize(cert_len);
     len = read(client_sock, &cert[0], cert_len);
-    if (len == -1) {
+    if (len == -1)
+    {
         std::cerr << "Read failed: " << strerror(errno) << std::endl;
         close(client_sock);
         RSA_free(server_rsa);
@@ -150,7 +179,8 @@ int main() {
 
     uint32_t sig_len;
     len = read(client_sock, &sig_len, sizeof(sig_len));
-    if (len == -1) {
+    if (len == -1)
+    {
         std::cerr << "Read failed: " << strerror(errno) << std::endl;
         close(client_sock);
         RSA_free(server_rsa);
@@ -161,7 +191,8 @@ int main() {
     std::string signature;
     signature.resize(sig_len);
     len = read(client_sock, &signature[0], sig_len);
-    if (len == -1) {
+    if (len == -1)
+    {
         std::cerr << "Read failed: " << strerror(errno) << std::endl;
         close(client_sock);
         RSA_free(server_rsa);
@@ -171,11 +202,12 @@ int main() {
     // Извлечение временного публичного ключа из сертификата
     std::string temp_pub_key_str = cert.substr(R.length());
 
-    bio = BIO_new_mem_buf((void*)temp_pub_key_str.c_str(), -1);
-    RSA* temp_rsa = PEM_read_bio_RSAPublicKey(bio, NULL, NULL, NULL);
+    bio = BIO_new_mem_buf((void *)temp_pub_key_str.c_str(), -1);
+    RSA *temp_rsa = PEM_read_bio_RSAPublicKey(bio, NULL, NULL, NULL);
     BIO_free(bio);
 
-    if (!temp_rsa) {
+    if (!temp_rsa)
+    {
         std::cerr << "Failed to parse temporary public key" << std::endl;
         close(client_sock);
         RSA_free(server_rsa);
@@ -186,7 +218,8 @@ int main() {
     printRSAKey(temp_rsa, false);
 
     // Проверка сертификата
-    if (!verifySignature(server_rsa, cert, signature)) {
+    if (!verifySignature(server_rsa, cert, signature))
+    {
         std::cerr << "Certificate verification failed" << std::endl;
         close(client_sock);
         RSA_free(server_rsa);
@@ -201,10 +234,11 @@ int main() {
     std::cout << "Session key generated: " << stringToHex(session_key) << std::endl;
 
     // Шифрование сессионного ключа временным публичным ключом
-    unsigned char* encrypted_session_key = new unsigned char[RSA_size(temp_rsa)];
-    int encrypted_session_key_len = RSA_public_encrypt(session_key.length(), (unsigned char*)session_key.c_str(), encrypted_session_key, temp_rsa, RSA_PKCS1_OAEP_PADDING);
+    unsigned char *encrypted_session_key = new unsigned char[RSA_size(temp_rsa)];
+    int encrypted_session_key_len = RSA_public_encrypt(session_key.length(), (unsigned char *)session_key.c_str(), encrypted_session_key, temp_rsa, RSA_PKCS1_OAEP_PADDING);
 
-    if (encrypted_session_key_len == -1) {
+    if (encrypted_session_key_len == -1)
+    {
         std::cerr << "Session key encryption failed" << std::endl;
         delete[] encrypted_session_key;
         close(client_sock);
@@ -214,8 +248,9 @@ int main() {
     }
 
     // Отправка зашифрованного сессионного ключа серверу
-    std::string encrypted_session_key_str((char*)encrypted_session_key, encrypted_session_key_len);
-    if (send(client_sock, encrypted_session_key_str.c_str(), encrypted_session_key_str.length(), 0) == -1) {
+    std::string encrypted_session_key_str((char *)encrypted_session_key, encrypted_session_key_len);
+    if (send(client_sock, encrypted_session_key_str.c_str(), encrypted_session_key_str.length(), 0) == -1)
+    {
         std::cerr << "Send failed: " << strerror(errno) << std::endl;
         delete[] encrypted_session_key;
         close(client_sock);
@@ -225,6 +260,92 @@ int main() {
     }
 
     std::cout << "Encrypted session key sent to server" << std::endl;
+
+    std::cout << std::endl;
+    std::cout << "=============================" << std::endl;
+    std::cout << "SECURE CONNECTION ESTABLISHED" << std::endl;
+    std::cout << "    SESSION KEY GENERATED    " << std::endl;
+    std::cout << "=============================" << std::endl;
+    std::cout << std::endl;
+
+    while (true)
+    {
+        std::cout << "Enter 'register', 'login', or 'exit': ";
+        std::string message;
+        std::cin >> message;
+
+        if (message == "exit")
+        {
+            if (!sendMessageToServer(client_sock, message))
+            {
+                close(client_sock);
+                RSA_free(server_rsa);
+                RSA_free(temp_rsa);
+                return -1;
+            }
+            break; // Завершаем цикл
+        }
+        else if (message == "register")
+        {
+            if (!sendMessageToServer(client_sock, message))
+            {
+                close(client_sock);
+                RSA_free(server_rsa);
+                RSA_free(temp_rsa);
+                return -1;
+            }
+
+            // Запрос информации у пользователя
+            std::string email, nickname, password;
+            std::cout << "Enter your email: ";
+            std::cin >> email;
+            std::cout << "Enter your nickname: ";
+            std::cin >> nickname;
+            std::cout << "Enter your password: ";
+            std::cin >> password;
+
+            // Отправка информации на сервер
+            std::string registration_info = email + ";" + nickname + ";" + password;
+            if (!sendMessageToServer(client_sock, registration_info))
+            {
+                close(client_sock);
+                RSA_free(server_rsa);
+                RSA_free(temp_rsa);
+                return -1;
+            }
+        }
+        else if (message == "login")
+        {
+            if (!sendMessageToServer(client_sock, message))
+            {
+                close(client_sock);
+                RSA_free(server_rsa);
+                RSA_free(temp_rsa);
+                return -1;
+            }
+
+            // Запрос информации у пользователя
+            std::string nickname, password;
+            std::cout << "Enter your nickname: ";
+            std::cin >> nickname;
+            std::cout << "Enter your password: ";
+            std::cin >> password;
+
+            // Отправка информации на сервер
+            std::string login_info = nickname + ";" + password;
+            if (!sendMessageToServer(client_sock, login_info))
+            {
+                close(client_sock);
+                RSA_free(server_rsa);
+                RSA_free(temp_rsa);
+                return -1;
+            }
+        }
+        else
+        {
+            std::cout << "Invalid command. Please enter 'register', 'login', or 'exit'." << std::endl;
+        }
+    }
 
     // Очистка ресурсов
     delete[] encrypted_session_key;

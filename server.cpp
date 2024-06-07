@@ -8,6 +8,20 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 
+// Получение сообщения от клиента
+std::string receiveMessageFromClient(int client_sock)
+{
+    char buffer[4096];
+    int len = read(client_sock, buffer, sizeof(buffer) - 1);
+    if (len == -1)
+    {
+        std::cerr << "Read failed: " << strerror(errno) << std::endl;
+        return "";
+    }
+    buffer[len] = '\0';
+    return std::string(buffer, len);
+}
+
 // Функция для вывода RSA ключей в PEM формате
 void printRSAKey(RSA *rsa, bool isPrivate)
 {
@@ -298,6 +312,52 @@ int main()
 
     std::cout << "Session key decrypted successfully" << std::endl;
     std::cout << "Session key: " << stringToHex(session_key) << std::endl;
+
+    std::cout << std::endl;
+    std::cout << "=============================" << std::endl;
+    std::cout << "SECURE CONNECTION ESTABLISHED" << std::endl;
+    std::cout << "    SESSION KEY GENERATED    " << std::endl;
+    std::cout << "=============================" << std::endl;
+    std::cout << std::endl;
+
+    // Получаем сообщения от клиента
+    while (true)
+    {
+        std::string message = receiveMessageFromClient(client_sock);
+        if (message.empty())
+        {
+            close(client_sock);
+            close(server_sock);
+            RSA_free(rsa);
+            RSA_free(temp_rsa);
+            return -1;
+        }
+        std::cout << "Received message from client: " << message << std::endl;
+
+        if (message == "exit")
+        {
+            break; // Завершаем цикл
+        }
+        else if (message == "register" || message == "login")
+        {
+            // Обработка регистрации или входа
+            std::string user_info = receiveMessageFromClient(client_sock);
+            if (user_info.empty())
+            {
+                close(client_sock);
+                close(server_sock);
+                RSA_free(rsa);
+                RSA_free(temp_rsa);
+                return -1;
+            }
+            std::cout << "Received user info from client: " << user_info << std::endl;
+            // Здесь можно добавить логику обработки полученной информации
+        }
+        else
+        {
+            // Обработка других сообщений
+        }
+    }
 
     // Закрытие соединений и освобождение ресурсов
     close(client_sock);
