@@ -9,6 +9,7 @@
 #include <arpa/inet.h>
 
 #include "encryptionAES.h"
+#include "RSA_utils.h"
 
 // Получение сообщения от клиента
 std::string receiveMessageFromClient(int client_sock)
@@ -24,25 +25,6 @@ std::string receiveMessageFromClient(int client_sock)
     return std::string(buffer, len);
 }
 
-// Функция для вывода RSA ключей в PEM формате
-void printRSAKey(RSA *rsa, bool isPrivate)
-{
-    BIO *bio = BIO_new(BIO_s_mem());
-    if (isPrivate)
-    {
-        PEM_write_bio_RSAPrivateKey(bio, rsa, NULL, NULL, 0, NULL, NULL);
-    }
-    else
-    {
-        PEM_write_bio_RSAPublicKey(bio, rsa);
-    }
-    char *key_data = NULL;
-    long len = BIO_get_mem_data(bio, &key_data);
-    std::string key_str(key_data, len);
-    std::cout << key_str << std::endl;
-    BIO_free(bio);
-}
-
 // Генерация случайного числа
 std::string generateRandomNumber()
 {
@@ -53,32 +35,6 @@ std::string generateRandomNumber()
         return "";
     }
     return std::string((char *)random_number, sizeof(random_number));
-}
-
-// Подпись сообщения приватным ключом RSA
-std::string signMessage(RSA *rsa, const std::string &message)
-{
-    unsigned char hash[32];
-    unsigned int sig_len;
-    unsigned char *sig = new unsigned char[RSA_size(rsa)];
-
-    if (SHA256((unsigned char *)message.c_str(), message.length(), hash) == NULL)
-    {
-        std::cerr << "SHA256 calculation failed" << std::endl;
-        delete[] sig;
-        return "";
-    }
-
-    if (RSA_sign(NID_sha256, hash, sizeof(hash), sig, &sig_len, rsa) != 1)
-    {
-        std::cerr << "Signing failed" << std::endl;
-        delete[] sig;
-        return "";
-    }
-
-    std::string signature((char *)sig, sig_len);
-    delete[] sig;
-    return signature;
 }
 
 // Функция для конвертации строки в шестнадцатеричное представление
