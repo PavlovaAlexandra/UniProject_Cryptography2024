@@ -272,7 +272,7 @@ int main()
             std::cout << "Enter your password: ";
             std::cin >> password;
 
-             // Генерация соли
+            // Генерация соли
             std::string salt = generate_salt(16);
 
             // Хеширование пароля с солью
@@ -294,6 +294,36 @@ int main()
                 RSA_free(temp_rsa);
                 return -1;
             }
+            
+            // Получить ответ от сервера
+            std::string response;
+            uint32_t response_len;
+            if (recv(client_sock, &response_len, sizeof(response_len), 0) == -1)
+            {
+                std::cerr << "Receive failed: " << strerror(errno) << std::endl;
+                close(client_sock);
+                RSA_free(server_rsa);
+                RSA_free(temp_rsa);
+                return -1;
+            }
+            response_len = ntohl(response_len);
+
+            char *buffer = new char[response_len + 1];
+            if (recv(client_sock, buffer, response_len, 0) == -1)
+            {
+                std::cerr << "Receive failed: " << strerror(errno) << std::endl;
+                delete[] buffer;
+                close(client_sock);
+                RSA_free(server_rsa);
+                RSA_free(temp_rsa);
+                return -1;
+            }
+            buffer[response_len] = '\0';
+            response = std::string(buffer);
+            delete[] buffer;
+
+            // Вывести сообщение пользователю
+            std::cout << response << std::endl;
         }
         else if (message == "login")
         {
@@ -319,6 +349,50 @@ int main()
                 RSA_free(temp_rsa);
                 return -1;
             }
+
+            // Получить ответ от сервера
+            std::string response;
+            uint32_t response_len;
+            if (recv(client_sock, &response_len, sizeof(response_len), 0) == -1)
+            {
+                std::cerr << "Receive failed: " << strerror(errno) << std::endl;
+                close(client_sock);
+                RSA_free(server_rsa);
+                RSA_free(temp_rsa);
+                return -1;
+            }
+            response_len = ntohl(response_len);
+
+            char *buffer = new char[response_len + 1];
+            if (recv(client_sock, buffer, response_len, 0) == -1)
+            {
+                std::cerr << "Receive failed: " << strerror(errno) << std::endl;
+                delete[] buffer;
+                close(client_sock);
+                RSA_free(server_rsa);
+                RSA_free(temp_rsa);
+                return -1;
+            }
+            buffer[response_len] = '\0';
+            response = std::string(buffer);
+            delete[] buffer;
+
+            // Вывести сообщение пользователю
+            std::cout << response << std::endl;
+
+            // Расшифровать ответ от сервера
+            std::string decrypted_response;
+            if (!aes_decrypt(response, decrypted_response, session_key, iv))
+            {
+                std::cerr << "Decryption of server response failed" << std::endl;
+                close(client_sock);
+                RSA_free(server_rsa);
+                RSA_free(temp_rsa);
+                return -1;
+            }
+
+            // Вывести расшифрованное сообщение пользователю
+            std::cout << decrypted_response << std::endl;
         }
         else
         {

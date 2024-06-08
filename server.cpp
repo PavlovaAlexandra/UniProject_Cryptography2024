@@ -5,11 +5,105 @@
 #include <openssl/err.h>
 #include <openssl/rand.h>
 #include <cstring>
-#include <unistd.h>
 #include <arpa/inet.h>
+#include <unistd.h>
+#include <sqlite3.h>
+#include <sstream>
+#include <vector>
 
 #include "encryptionAES.h"
 #include "RSA_utils.h"
+#include "hashing.h"
+
+// Функция для выполнения запросов к базе данных
+int executeQuery(sqlite3 *db, const std::string &query)
+{
+    char *errMsg;
+    int result = sqlite3_exec(db, query.c_str(), NULL, 0, &errMsg);
+    if (result != SQLITE_OK)
+    {
+        std::cerr << "SQL error: " << errMsg << std::endl;
+        sqlite3_free(errMsg);
+    }
+    return result;
+}
+
+int executeQueryWithResult(sqlite3 *db, const std::string &query, int &result_count)
+{
+    sqlite3_stmt *stmt;
+    int result = sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, NULL);
+    if (result != SQLITE_OK)
+    {
+        std::cerr << "SQL error: " << sqlite3_errmsg(db) << std::endl;
+        return result;
+    }
+
+    // Выполнение запроса
+    result = sqlite3_step(stmt);
+    if (result != SQLITE_ROW && result != SQLITE_DONE)
+    {
+        std::cerr << "SQL execution error: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_finalize(stmt);
+        return result;
+    }
+
+    // Получение результата
+    if (result == SQLITE_ROW)
+    {
+        // Результат есть, извлекаем его
+        result_count = sqlite3_column_int(stmt, 0);
+    }
+    else if (result == SQLITE_DONE)
+    {
+        // Результат пуст
+        result_count = 0;
+    }
+
+    // Освобождаем выделенные ресурсы
+    sqlite3_finalize(stmt);
+
+    return SQLITE_OK;
+}
+
+int executeQueryWithResult(sqlite3* db, const std::string& query, std::string& result)
+{
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "SQL error (prepare): " << sqlite3_errmsg(db) << std::endl;
+        return rc;
+    }
+
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW)
+    {
+        const unsigned char* text = sqlite3_column_text(stmt, 0);
+        if (text)
+        {
+            result = reinterpret_cast<const char*>(text);
+        }
+        else
+        {
+            result.clear();
+        }
+        rc = SQLITE_OK; // Данные извлечены успешно
+    }
+    else if (rc == SQLITE_DONE)
+    {
+        result.clear();
+        std::cerr << "No rows found for query: " << query << std::endl;
+        rc = SQLITE_ERROR; // Нет строк, считаем это ошибкой для данной функции
+    }
+    else
+    {
+        std::cerr << "SQL error (step): " << sqlite3_errmsg(db) << std::endl;
+    }
+
+    sqlite3_finalize(stmt);
+    return rc;
+}
+
 
 // Получение сообщения от клиента
 std::string receiveMessageFromClient(int client_sock)
@@ -278,6 +372,25 @@ int main()
     std::cout << "===========================================================" << std::endl;
     std::cout << std::endl;
 
+    // Инициализация SQLite и открытие базы данных
+    sqlite3 *db;
+    int rc = sqlite3_open("BBS.db", &db);
+    if (rc)
+    {
+        std::cerr << "Can't open database: " << sqlite3_errmsg(db) << std::endl;
+        return -1;
+    }
+
+    // Создание таблицы пользователей (если не существует)
+    std::string createTableQuery = "CREATE TABLE IF NOT EXISTS users (email TEXT, nickname TEXT, password TEXT, salt TEXT);";
+    rc = executeQuery(db, createTableQuery);
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "Failed to create table: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_close(db);
+        return -1;
+    }
+
     // Получаем сообщения от клиента
     while (true)
     {
@@ -288,6 +401,7 @@ int main()
             close(server_sock);
             RSA_free(rsa);
             RSA_free(temp_rsa);
+            sqlite3_close(db);
             return -1;
         }
 
@@ -306,7 +420,160 @@ int main()
         {
             break; // Завершаем цикл
         }
-        else if (decrypted_message == "register" || decrypted_message == "login")
+        else if (decrypted_message == "register")
+        {
+            // Получить зашифрованные данные о регистрации от клиента
+            encrypted_message = receiveMessageFromClient(client_sock);
+            if (encrypted_message.empty())
+            {
+                close(client_sock);
+                close(server_sock);
+                RSA_free(rsa);
+                RSA_free(temp_rsa);
+                sqlite3_close(db);
+                return -1;
+            }
+
+            // Расшифровать полученное сообщение
+            if (!aes_decrypt(encrypted_message, decrypted_message, session_key, iv))
+            {
+                std::cerr << "Decryption failed" << std::endl;
+                continue;
+            }
+
+            std::cout << "Received user info from client: " << decrypted_message << std::endl;
+
+            // Разбить полученную информацию на компоненты с разделителем ";"
+            std::istringstream iss(decrypted_message);
+            std::vector<std::string> components;
+            std::string component;
+            while (std::getline(iss, component, ';'))
+            {
+                components.push_back(component);
+            }
+
+            // Проверка, что количество компонентов соответствует ожидаемому
+            if (components.size() != 4)
+            {
+                std::cerr << "Invalid user info format" << std::endl;
+                continue; // Можно обработать ошибку каким-то образом и продолжить цикл
+            }
+
+            // Извлечение компонентов из вектора
+            std::string email = components[0];
+            std::string nickname = components[1];
+            std::string password = components[2];
+            std::string salt = components[3];
+
+            ///////////////////////////////////
+            /////до этого момента все хорошо, разбили полученные данные на email, nickname, password и соль
+
+            // Проверка уникальности логина в базе данных
+            std::string checkQuery = "SELECT COUNT(*) FROM users WHERE nickname='" + nickname + "';";
+            int count;
+            rc = executeQueryWithResult(db, checkQuery, count);
+            //////////
+            std::cout << "rc: " << rc << std::endl;
+            ////////
+            if (rc != SQLITE_OK)
+            {
+                std::cerr << "Failed to execute query to check nickname existence" << std::endl;
+                continue; // Можно обработать ошибку и продолжить цикл
+            }
+            if (count > 0)
+            {
+                ////////////
+                std::cout << "Логин уже есть!" << std::endl;
+                ////////////
+
+                // Логин уже существует, отправить клиенту сообщение об ошибке
+                std::string error_message = "Nickname already exists. Please choose a different nickname.";
+                uint32_t msg_len = htonl(error_message.length());
+                if (send(client_sock, &msg_len, sizeof(msg_len), 0) == -1)
+                {
+                    std::cerr << "Send failed: " << strerror(errno) << std::endl;
+                    close(client_sock);
+                    close(server_sock);
+                    RSA_free(rsa);
+                    RSA_free(temp_rsa);
+                    sqlite3_close(db);
+                    return -1;
+                }
+
+                if (send(client_sock, error_message.c_str(), error_message.length(), 0) == -1)
+                {
+                    std::cerr << "Send failed: " << strerror(errno) << std::endl;
+                    close(client_sock);
+                    close(server_sock);
+                    RSA_free(rsa);
+                    RSA_free(temp_rsa);
+                    sqlite3_close(db);
+                    return -1;
+                }
+                std::cout << "Сообщение о том что такой логин уже есть отправлено" << std::endl;
+                continue; // Прервать регистрацию
+            }
+
+            // Запись информации о пользователе в базу данных
+            std::string insertQuery = "INSERT INTO users (email, nickname, password, salt) VALUES ('" + email + "', '" + nickname + "', '" + password + "', '" + salt + "');";
+            rc = executeQuery(db, insertQuery);
+            if (rc != SQLITE_OK)
+            {
+                std::cerr << "Failed to insert user info into database" << std::endl;
+                std::string error_message = "Registration failed. Please try again.";
+                uint32_t msg_len = htonl(error_message.length());
+                if (send(client_sock, &msg_len, sizeof(msg_len), 0) == -1)
+                {
+                    std::cerr << "Send failed: " << strerror(errno) << std::endl;
+                    close(client_sock);
+                    close(server_sock);
+                    RSA_free(rsa);
+                    RSA_free(temp_rsa);
+                    sqlite3_close(db);
+                    return -1;
+                }
+
+                if (send(client_sock, error_message.c_str(), error_message.length(), 0) == -1)
+                {
+                    std::cerr << "Send failed: " << strerror(errno) << std::endl;
+                    close(client_sock);
+                    close(server_sock);
+                    RSA_free(rsa);
+                    RSA_free(temp_rsa);
+                    sqlite3_close(db);
+                    return -1;
+                }
+                continue; // Можно обработать ошибку каким-то образом и продолжить цикл
+            }
+            std::cout << "User info inserted into database" << std::endl;
+
+            // Отправка сообщения об успешной регистрации
+            std::string success_message = "Registration successful. You can log in now, " + nickname + "!";
+            uint32_t msg_len = htonl(success_message.length());
+            if (send(client_sock, &msg_len, sizeof(msg_len), 0) == -1)
+            {
+                std::cerr << "Send failed: " << strerror(errno) << std::endl;
+                close(client_sock);
+                close(server_sock);
+                RSA_free(rsa);
+                RSA_free(temp_rsa);
+                sqlite3_close(db);
+                return -1;
+            }
+
+            if (send(client_sock, success_message.c_str(), success_message.length(), 0) == -1)
+            {
+                std::cerr << "Send failed: " << strerror(errno) << std::endl;
+                close(client_sock);
+                close(server_sock);
+                RSA_free(rsa);
+                RSA_free(temp_rsa);
+                sqlite3_close(db);
+                return -1;
+            }
+            std::cout << "Message sent to client about successful registration in database" << std::endl;
+        }
+        else if (decrypted_message == "login")
         {
             // Обработка регистрации или входа
             encrypted_message = receiveMessageFromClient(client_sock);
@@ -316,6 +583,7 @@ int main()
                 close(server_sock);
                 RSA_free(rsa);
                 RSA_free(temp_rsa);
+                sqlite3_close(db);
                 return -1;
             }
 
@@ -326,7 +594,96 @@ int main()
             }
 
             std::cout << "Received user info from client: " << decrypted_message << std::endl;
-            // Здесь можно добавить логику обработки полученной информации
+
+            // Разбиение строки decrypted_message на компоненты с разделителем ";"
+            std::istringstream iss(decrypted_message);
+            std::vector<std::string> components;
+            std::string component;
+            while (std::getline(iss, component, ';'))
+            {
+                components.push_back(component);
+            }
+
+            // Проверка, что количество компонентов соответствует ожидаемому
+            if (components.size() != 2)
+            {
+                std::cerr << "Invalid user info format" << std::endl;
+                continue; // Можно обработать ошибку каким-то образом и продолжить цикл
+            }
+
+            // Извлечение компонентов из вектора
+            std::string nickname = components[0];
+            std::string password = components[1];
+
+            ////////////
+            std::cout << "Nickname: " << nickname << std::endl;
+            std::cout << "Password: " << password << std::endl;
+            ////////////
+
+            // Получить соль из базы данных
+            std::string db_salt;
+            std::string selectSaltQuery = "SELECT salt FROM users WHERE nickname='" + nickname + "';";
+            int rc1 = executeQueryWithResult(db, selectSaltQuery, db_salt);
+            std::cout << "rc1= " << rc1 << std::endl;
+            if (rc1 != SQLITE_OK || db_salt.empty())
+            {
+                std::cerr << "Failed to retrieve salt from database or no salt found for user: " << nickname << std::endl;
+                std::string error_message = "Invalid login or password. Please try again.";
+                std::string encrypted_response;
+                if (!aes_encrypt(error_message, encrypted_response, session_key, iv))
+                {
+                    std::cerr << "Encryption failed" << std::endl;
+                    continue;
+                }
+
+                uint32_t msg_len = htonl(encrypted_response.length());
+                send(client_sock, &msg_len, sizeof(msg_len), 0);
+                send(client_sock, encrypted_response.c_str(), encrypted_response.length(), 0);
+                continue;
+            }
+
+            // Хеширование введенного пароля с солью
+            std::string hashed_password = hash_password(password, db_salt);
+
+            // Получить хэш пароля из базы данных
+            std::string db_hashed_password;
+            std::string selectPasswordQuery = "SELECT password FROM users WHERE nickname='" + nickname + "';";
+            int rc2 = executeQueryWithResult(db, selectPasswordQuery, db_hashed_password);
+            if (rc2 != SQLITE_OK)
+            {
+                std::cerr << "Failed to retrieve hashed password from database" << std::endl;
+                continue;
+            }
+
+            // Сравнить хэши
+            if (hashed_password == db_hashed_password)
+            {
+                std::string success_message = "Login successful. Welcome, " + nickname + "!";
+                std::string encrypted_response;
+                if (!aes_encrypt(success_message, encrypted_response, session_key, iv))
+                {
+                    std::cerr << "Encryption failed" << std::endl;
+                    continue;
+                }
+
+                uint32_t msg_len = htonl(encrypted_response.length());
+                send(client_sock, &msg_len, sizeof(msg_len), 0);
+                send(client_sock, encrypted_response.c_str(), encrypted_response.length(), 0);
+            }
+            else
+            {
+                std::string error_message = "Invalid login or password. Please try again.";
+                std::string encrypted_response;
+                if (!aes_encrypt(error_message, encrypted_response, session_key, iv))
+                {
+                    std::cerr << "Encryption failed" << std::endl;
+                    continue;
+                }
+
+                uint32_t msg_len = htonl(encrypted_response.length());
+                send(client_sock, &msg_len, sizeof(msg_len), 0);
+                send(client_sock, encrypted_response.c_str(), encrypted_response.length(), 0);
+            }
         }
         else
         {
@@ -339,6 +696,7 @@ int main()
     close(server_sock);
     RSA_free(rsa);
     RSA_free(temp_rsa);
+    sqlite3_close(db);
 
     return 0;
 }
