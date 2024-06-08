@@ -11,6 +11,7 @@
 
 #include "encryptionAES.h"
 #include "RSA_utils.h"
+#include "hashing.h"
 
 // Отправка сообщения серверу
 bool sendMessageToServer(int client_sock, const std::string &message)
@@ -271,8 +272,15 @@ int main()
             std::cout << "Enter your password: ";
             std::cin >> password;
 
-            // Отправка информации на сервер
-            std::string registration_info = email + ";" + nickname + ";" + password;
+             // Генерация соли
+            std::string salt = generate_salt(16);
+
+            // Хеширование пароля с солью
+            std::string hashed_password = hash_password(password, salt);
+
+            // Формирование строки для отправки: email;nickname;hashed_password;salt
+            std::string registration_info = email + ";" + nickname + ";" + hashed_password + ";" + salt;
+
             if (!aes_encrypt(registration_info, encrypted_message, session_key, iv))
             {
                 std::cerr << "Encryption failed" << std::endl;
