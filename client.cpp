@@ -9,6 +9,8 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
+#include "encryptionAES.h"
+
 // Отправка сообщения серверу
 bool sendMessageToServer(int client_sock, const std::string &message)
 {
@@ -262,10 +264,10 @@ int main()
     std::cout << "Encrypted session key sent to server" << std::endl;
 
     std::cout << std::endl;
-    std::cout << "=============================" << std::endl;
-    std::cout << "SECURE CONNECTION ESTABLISHED" << std::endl;
-    std::cout << "    SESSION KEY GENERATED    " << std::endl;
-    std::cout << "=============================" << std::endl;
+    std::cout << "===========================================================" << std::endl;
+    std::cout << "=============  SECURE CONNECTION ESTABLISHED  =============" << std::endl;
+    std::cout << "=============      SESSION KEY GENERATED      =============" << std::endl;
+    std::cout << "===========================================================" << std::endl;
     std::cout << std::endl;
 
     while (true)
@@ -274,27 +276,29 @@ int main()
         std::string message;
         std::cin >> message;
 
+        std::string iv = "0123456789012345"; // Initialization Vector (IV)
+        std::string encrypted_message;
+
+        if (!aes_encrypt(message, encrypted_message, session_key, iv))
+        {
+            std::cerr << "Encryption failed" << std::endl;
+            continue;
+        }
+
+        if (!sendMessageToServer(client_sock, encrypted_message))
+        {
+            close(client_sock);
+            RSA_free(server_rsa);
+            RSA_free(temp_rsa);
+            return -1;
+        }
+
         if (message == "exit")
         {
-            if (!sendMessageToServer(client_sock, message))
-            {
-                close(client_sock);
-                RSA_free(server_rsa);
-                RSA_free(temp_rsa);
-                return -1;
-            }
             break; // Завершаем цикл
         }
         else if (message == "register")
         {
-            if (!sendMessageToServer(client_sock, message))
-            {
-                close(client_sock);
-                RSA_free(server_rsa);
-                RSA_free(temp_rsa);
-                return -1;
-            }
-
             // Запрос информации у пользователя
             std::string email, nickname, password;
             std::cout << "Enter your email: ";
@@ -306,7 +310,13 @@ int main()
 
             // Отправка информации на сервер
             std::string registration_info = email + ";" + nickname + ";" + password;
-            if (!sendMessageToServer(client_sock, registration_info))
+            if (!aes_encrypt(registration_info, encrypted_message, session_key, iv))
+            {
+                std::cerr << "Encryption failed" << std::endl;
+                continue;
+            }
+
+            if (!sendMessageToServer(client_sock, encrypted_message))
             {
                 close(client_sock);
                 RSA_free(server_rsa);
@@ -316,14 +326,6 @@ int main()
         }
         else if (message == "login")
         {
-            if (!sendMessageToServer(client_sock, message))
-            {
-                close(client_sock);
-                RSA_free(server_rsa);
-                RSA_free(temp_rsa);
-                return -1;
-            }
-
             // Запрос информации у пользователя
             std::string nickname, password;
             std::cout << "Enter your nickname: ";
@@ -333,7 +335,13 @@ int main()
 
             // Отправка информации на сервер
             std::string login_info = nickname + ";" + password;
-            if (!sendMessageToServer(client_sock, login_info))
+            if (!aes_encrypt(login_info, encrypted_message, session_key, iv))
+            {
+                std::cerr << "Encryption failed" << std::endl;
+                continue;
+            }
+
+            if (!sendMessageToServer(client_sock, encrypted_message))
             {
                 close(client_sock);
                 RSA_free(server_rsa);

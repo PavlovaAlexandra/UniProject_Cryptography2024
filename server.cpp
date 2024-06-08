@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 
+#include "encryptionAES.h"
+
 // Получение сообщения от клиента
 std::string receiveMessageFromClient(int client_sock)
 {
@@ -314,17 +316,17 @@ int main()
     std::cout << "Session key: " << stringToHex(session_key) << std::endl;
 
     std::cout << std::endl;
-    std::cout << "=============================" << std::endl;
-    std::cout << "SECURE CONNECTION ESTABLISHED" << std::endl;
-    std::cout << "    SESSION KEY GENERATED    " << std::endl;
-    std::cout << "=============================" << std::endl;
+    std::cout << "===========================================================" << std::endl;
+    std::cout << "=============  SECURE CONNECTION ESTABLISHED  =============" << std::endl;
+    std::cout << "=============      SESSION KEY GENERATED      =============" << std::endl;
+    std::cout << "===========================================================" << std::endl;
     std::cout << std::endl;
 
     // Получаем сообщения от клиента
     while (true)
     {
-        std::string message = receiveMessageFromClient(client_sock);
-        if (message.empty())
+        std::string encrypted_message = receiveMessageFromClient(client_sock);
+        if (encrypted_message.empty())
         {
             close(client_sock);
             close(server_sock);
@@ -332,17 +334,27 @@ int main()
             RSA_free(temp_rsa);
             return -1;
         }
-        std::cout << "Received message from client: " << message << std::endl;
 
-        if (message == "exit")
+        std::string iv = "0123456789012345"; // Initialization Vector (IV)
+        std::string decrypted_message;
+
+        if (!aes_decrypt(encrypted_message, decrypted_message, session_key, iv))
+        {
+            std::cerr << "Decryption failed" << std::endl;
+            continue;
+        }
+
+        std::cout << "Received message from client: " << decrypted_message << std::endl;
+
+        if (decrypted_message == "exit")
         {
             break; // Завершаем цикл
         }
-        else if (message == "register" || message == "login")
+        else if (decrypted_message == "register" || decrypted_message == "login")
         {
             // Обработка регистрации или входа
-            std::string user_info = receiveMessageFromClient(client_sock);
-            if (user_info.empty())
+            encrypted_message = receiveMessageFromClient(client_sock);
+            if (encrypted_message.empty())
             {
                 close(client_sock);
                 close(server_sock);
@@ -350,7 +362,14 @@ int main()
                 RSA_free(temp_rsa);
                 return -1;
             }
-            std::cout << "Received user info from client: " << user_info << std::endl;
+
+            if (!aes_decrypt(encrypted_message, decrypted_message, session_key, iv))
+            {
+                std::cerr << "Decryption failed" << std::endl;
+                continue;
+            }
+
+            std::cout << "Received user info from client: " << decrypted_message << std::endl;
             // Здесь можно добавить логику обработки полученной информации
         }
         else
