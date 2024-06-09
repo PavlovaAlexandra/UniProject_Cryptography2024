@@ -8,10 +8,86 @@
 #include <cstring>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <random>
+
+#include <curl/curl.h>
 
 #include "encryptionAES.h"
 #include "RSA_utils.h"
 #include "hashing.h"
+
+// Генерация OTP
+std::string generate_otp(size_t length) {
+    std::string characters = "0123456789";
+    std::string otp;
+    std::random_device rd;
+    std::mt19937 generator(rd());
+    std::uniform_int_distribution<> distribution(0, characters.size() - 1);
+
+    for (size_t i = 0; i < length; ++i) {
+        otp += characters[distribution(generator)];
+    }
+
+    return otp;
+}
+
+// Функция обратного вызова для передачи данных тела сообщения
+size_t payload_source(void *ptr, size_t size, size_t nmemb, void *userp) {
+    std::string *payload = static_cast<std::string*>(userp);
+    size_t len = payload->size();
+
+    if (len > 0) {
+        size_t bytes_to_send = size * nmemb < len ? size * nmemb : len;
+        memcpy(ptr, payload->c_str(), bytes_to_send);
+        payload->erase(0, bytes_to_send);
+        return bytes_to_send;
+    }
+
+    return 0;
+}
+
+// Отправка OTP на email
+bool send_otp_to_email(const std::string& email, const std::string& otp) {
+    CURL *curl;
+    CURLcode res = CURLE_OK;
+
+    curl = curl_easy_init();
+    if (curl) {
+        std::string from = "pavloffalexandra@gmail.com"; // Замените на вашу почту
+        std::string to = email;
+        std::string subject = "Your OTP Code";
+        std::string body = "To: " + to + "\r\n"
+                           "From: " + from + "\r\n"
+                           "Subject: " + subject + "\r\n\r\n"
+                           "Your OTP code is: " + otp + "\r\n";
+
+        struct curl_slist *recipients = NULL;
+        recipients = curl_slist_append(recipients, to.c_str());
+
+        curl_easy_setopt(curl, CURLOPT_URL, "smtp://smtp.gmail.com:587");
+        curl_easy_setopt(curl, CURLOPT_USERNAME, from.c_str());
+        curl_easy_setopt(curl, CURLOPT_PASSWORD, "oiem lwls ckwb tffz"); // Убедитесь, что переменная окружения установлена
+        curl_easy_setopt(curl, CURLOPT_MAIL_FROM, from.c_str());
+        curl_easy_setopt(curl, CURLOPT_MAIL_RCPT, recipients);
+        curl_easy_setopt(curl, CURLOPT_USE_SSL, CURLUSESSL_ALL);
+        curl_easy_setopt(curl, CURLOPT_READFUNCTION, payload_source);
+        curl_easy_setopt(curl, CURLOPT_READDATA, &body);
+        curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+
+        res = curl_easy_perform(curl);
+
+        curl_slist_free_all(recipients);
+        curl_easy_cleanup(curl);
+
+        if (res != CURLE_OK) {
+            std::cerr << "curl_easy_perform() failed: " << curl_easy_strerror(res) << std::endl;
+            return false;
+        }
+    }
+
+    return true;
+}
 
 // Отправка сообщения серверу
 bool sendMessageToServer(int client_sock, const std::string &message)
@@ -277,6 +353,24 @@ int main()
 
             // Хеширование пароля с солью
             std::string hashed_password = hash_password(password, salt);
+
+            // Генерация и отправка OTP
+            std::string otp = generate_otp(6); // Генерация OTP длиной 6 символов
+            if (!send_otp_to_email(email, otp)) {
+                std::cerr << "Failed to send OTP" << std::endl;
+                continue;
+            }
+
+            // Запрос OTP у пользователя
+            std::string entered_otp;
+            std::cout << "Enter the OTP sent to your email: ";
+            std::cin >> entered_otp;
+
+            // Проверка OTP
+            if (entered_otp != otp) {
+                std::cerr << "Invalid OTP" << std::endl;
+                continue;
+            }
 
             // Формирование строки для отправки: email;nickname;hashed_password;salt
             std::string registration_info = email + ";" + nickname + ";" + hashed_password + ";" + salt;
