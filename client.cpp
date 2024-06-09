@@ -377,9 +377,6 @@ int main()
             response = std::string(buffer);
             delete[] buffer;
 
-            // Вывести сообщение пользователю
-            std::cout << response << std::endl;
-
             // Расшифровать ответ от сервера
             std::string decrypted_response;
             if (!aes_decrypt(response, decrypted_response, session_key, iv))
@@ -393,6 +390,104 @@ int main()
 
             // Вывести расшифрованное сообщение пользователю
             std::cout << decrypted_response << std::endl;
+
+            // Проверка успешности входа
+            if (decrypted_response.find("Login successful") != std::string::npos)
+            {
+                while (true)
+                {
+                    std::cout << "Enter 'List', 'Get', 'Add', or 'logout': ";
+                    std::string command;
+                    std::cin >> command;
+
+                    if (command == "logout")
+                    {
+                        break;
+                    }
+                    else if (command == "List")
+                    {
+                        std::string n;
+                        std::cout << "Enter number of messages to list: ";
+                        std::cin >> n;
+                        command += " " + n;
+                    }
+                    else if (command == "Get")
+                    {
+                        std::string mid;
+                        std::cout << "Enter message identifier: ";
+                        std::cin >> mid;
+                        command += " " + mid;
+                    }
+                    else if (command == "Add")
+                    {
+                        std::string title, author, body;
+                        std::cout << "Enter message title: ";
+                        std::cin.ignore(); // Ignore newline character left in buffer
+                        std::getline(std::cin, title);
+                        std::cout << "Enter message author: ";
+                        std::getline(std::cin, author);
+                        std::cout << "Enter message body: ";
+                        std::getline(std::cin, body);
+                        command += " " + title + ";" + author + ";" + body;
+                    }
+                    else
+                    {
+                        std::cout << "Invalid command." << std::endl;
+                        continue;
+                    }
+
+                    // Шифруем команду
+                    if (!aes_encrypt(command, encrypted_message, session_key, iv))
+                    {
+                        std::cerr << "Encryption failed" << std::endl;
+                        continue;
+                    }
+
+                    // Отправляем команду на сервер
+                    if (!sendMessageToServer(client_sock, encrypted_message))
+                    {
+                        close(client_sock);
+                        RSA_free(server_rsa);
+                        RSA_free(temp_rsa);
+                        return -1;
+                    }
+
+                    // Получаем ответ от сервера
+                    if (recv(client_sock, &response_len, sizeof(response_len), 0) == -1)
+                    {
+                        std::cerr << "Receive failed: " << strerror(errno) << std::endl;
+                        close(client_sock);
+                        RSA_free(server_rsa);
+                        RSA_free(temp_rsa);
+                        return -1;
+                    }
+                    response_len = ntohl(response_len);
+
+                    buffer = new char[response_len + 1];
+                    if (recv(client_sock, buffer, response_len, 0) == -1)
+                    {
+                        std::cerr << "Receive failed: " << strerror(errno) << std::endl;
+                        delete[] buffer;
+                        close(client_sock);
+                        RSA_free(server_rsa);
+                        RSA_free(temp_rsa);
+                        return -1;
+                    }
+                    buffer[response_len] = '\0';
+                    response = std::string(buffer);
+                    delete[] buffer;
+
+                    // // Расшифровываем ответ
+                    // if (!aes_decrypt(response, decrypted_response, session_key, iv))
+                    // {
+                    //     std::cerr << "Decryption failed" << std::endl;
+                    //     continue;
+                    // }
+
+                    // Выводим результат
+                    std::cout << response << std::endl;
+                }
+            }
         }
         else
         {

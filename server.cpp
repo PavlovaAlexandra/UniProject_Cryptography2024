@@ -104,7 +104,6 @@ int executeQueryWithResult(sqlite3* db, const std::string& query, std::string& r
     return rc;
 }
 
-
 // Получение сообщения от клиента
 std::string receiveMessageFromClient(int client_sock)
 {
@@ -117,6 +116,121 @@ std::string receiveMessageFromClient(int client_sock)
     }
     buffer[len] = '\0';
     return std::string(buffer, len);
+}
+
+// Отправка сообщения клиенту
+bool sendMessageToClient(int client_sock, const std::string &message)
+{
+    uint32_t msg_len = htonl(message.length());
+    if (send(client_sock, &msg_len, sizeof(msg_len), 0) == -1)
+    {
+        std::cerr << "Send failed: " << strerror(errno) << std::endl;
+        return false;
+    }
+    if (send(client_sock, message.c_str(), message.length(), 0) == -1)
+    {
+        std::cerr << "Send failed: " << strerror(errno) << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Обработка команды Add
+void handleAdd(int client_sock, const std::string &decrypted_message, sqlite3 *db)
+{
+    std::istringstream iss(decrypted_message);
+    std::string command, title, author, body;
+    std::getline(iss, command, ' ');
+    std::getline(iss, title, ';');
+    std::getline(iss, author, ';');
+    std::getline(iss, body, ';');
+
+    std::string insertQuery = "INSERT INTO messages (title, author, body) VALUES ('" + title + "', '" + author + "', '" + body + "');";
+    int rc = executeQuery(db, insertQuery);
+    std::string response;
+
+    if (rc == SQLITE_OK)
+    {
+        response = "Message added successfully.";
+    }
+    else
+    {
+        response = "Failed to add message.";
+    }
+
+    sendMessageToClient(client_sock, response);
+}
+
+// Обработка команды Get
+void handleGet(int client_sock, const std::string &decrypted_message, sqlite3 *db)
+{
+    std::istringstream iss(decrypted_message);
+    std::string command, mid;
+    std::getline(iss, command, ' ');
+    std::getline(iss, mid, ' ');
+
+    std::string query = "SELECT * FROM messages WHERE identifier=" + mid + ";";
+    sqlite3_stmt *stmt;
+    std::string response;
+
+    if (sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, nullptr) == SQLITE_OK)
+    {
+        if (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            response += "Title: " + std::string(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1))) + "\n";
+            response += "Author: " + std::string(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2))) + "\n";
+            response += "Body: " + std::string(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 3))) + "\n";
+        }
+        else
+        {
+            response = "Message not found.";
+        }
+        sqlite3_finalize(stmt);
+    }
+    else
+    {
+        response = "Failed to retrieve message.";
+    }
+
+    sendMessageToClient(client_sock, response);
+}
+
+// Обработка команды List
+void handleList(int client_sock, const std::string &decrypted_message, sqlite3 *db)
+{
+    std::istringstream iss(decrypted_message);
+    std::string command, n;
+    std::getline(iss, command, ' ');
+    std::getline(iss, n, ' ');
+
+    std::string query = "SELECT * FROM messages ORDER BY identifier DESC LIMIT " + n + ";";
+    sqlite3_stmt *stmt;
+    std::string response;
+
+    if (sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, nullptr) == SQLITE_OK)
+    {
+        while (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            response += "ID: " + std::to_string(sqlite3_column_int(stmt, 0)) + " | ";
+            response += "Title: " + std::string(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 1))) + " | ";
+            response += "Author: " + std::string(reinterpret_cast<const char *>(sqlite3_column_text(stmt, 2))) + "\n";
+        }
+        sqlite3_finalize(stmt);
+    }
+    else
+    {
+        response = "Failed to list messages.";
+    }
+
+    sendMessageToClient(client_sock, response);
+}
+
+// Обработка команды logout
+void handleLogout(int client_sock)
+{
+    std::string response = "Logout successful.";
+    sendMessageToClient(client_sock, response);
+    close(client_sock);
 }
 
 // Генерация случайного числа
@@ -387,6 +501,16 @@ int main()
     if (rc != SQLITE_OK)
     {
         std::cerr << "Failed to create table: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_close(db);
+        return -1;
+    }
+
+    // Создание таблицы сообщений (если не существует)
+    std::string createMessagesTableQuery = "CREATE TABLE IF NOT EXISTS messages (identifier INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, author TEXT, body TEXT);";
+    rc = executeQuery(db, createMessagesTableQuery);
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "Failed to create messages table: " << sqlite3_errmsg(db) << std::endl;
         sqlite3_close(db);
         return -1;
     }
@@ -684,6 +808,23 @@ int main()
                 send(client_sock, &msg_len, sizeof(msg_len), 0);
                 send(client_sock, encrypted_response.c_str(), encrypted_response.length(), 0);
             }
+        }
+        else if (decrypted_message.find("Add ") == 0)
+        {
+            handleAdd(client_sock, decrypted_message, db);
+        }
+        else if (decrypted_message.find("Get ") == 0)
+        {
+            handleGet(client_sock, decrypted_message, db);
+        }
+        else if (decrypted_message.find("List ") == 0)
+        {
+            handleList(client_sock, decrypted_message, db);
+        }
+        else if (decrypted_message == "logout")
+        {
+            handleLogout(client_sock);
+            break;
         }
         else
         {
