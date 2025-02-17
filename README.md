@@ -10,7 +10,6 @@ This project is an implementation of secure client-server communication using cr
 - **Client-Server Architecture**: A basic client-server communication model.
 - **One-Time Password (OTP)**: The client generates an OTP for authentication.
 - **SQLite Database**: The server utilizes SQLite for storing user data and logs.
-- **cURL API Requests**: The client interacts with external APIs using cURL.
 
 ## Project Structure
 - `server.cpp` - The server-side implementation that handles encrypted communication and database operations.
